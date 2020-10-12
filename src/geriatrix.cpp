@@ -8,27 +8,77 @@
  */
 
 #include "geriatrix.h"
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <linux/fs.h>
+#include <errno.h>
+#include <pthread.h>
 
-#ifdef NEED_POSIX_FALLOCATE
+#define WRITE_SIZE 16384
+#define handle_error_en(en, msg) \
+               do { errno = en; perror(msg); exit(EXIT_FAILURE); } while (0)
+
 /*
  * fake posix_fallocate by ftruncating the file larger and touching
  * a byte in each block.... returns 0 on success, errno on fail(!!!)
  * (this is at the top of the file so it can be included in the
  * posix driver if needed...)
  */
-static int posix_fallocate(int fd, off_t offset, off_t len) {
+static int my_posix_fallocate(int fd, off_t offset, off_t len) {
     struct stat st;
     off_t newlen, curoff, lastoff, ptr;
     ssize_t rv;
+    size_t data_written = 0;
+    char *buf = NULL;
+    size_t len_to_write = 0;
+    size_t len_written = 0;
 
     newlen = offset + len;
+    buf = (char *) malloc(WRITE_SIZE * sizeof(char));
+    memset(buf, 'A', WRITE_SIZE);
 
-    if (fstat(fd, &st) < 0)
+    if (fstat(fd, &st) < 0) {
+        printf("%s: file creation problems\n", __func__);
         return(errno);
+    }
 
-    if (st.st_size > newlen)        /* not growing it, assume ok */
+    if (st.st_size > newlen) {        /* not growing it, assume ok */
+        printf("%s: st_size > newlen\n", __func__);
         return(0);
+    }
 
+    while(data_written < newlen) {
+
+        len_to_write = (newlen - data_written) >= WRITE_SIZE ? WRITE_SIZE : (newlen - data_written);
+        len_written = write(fd, buf, len_to_write);
+        if (len_written < len_to_write) {
+            printf("%s: write failed\n", __func__);
+            return(errno);
+        }
+        fsync(fd);
+        data_written += len_written;
+    }
+
+    if (data_written != newlen) {
+        printf("something wrong in writing. data_written = %lu, filesize = %lu\n",
+                data_written, newlen);
+        return -1;
+    }
+
+    fsync(fd);
+
+    if (fstat(fd, &st) < 0) {
+        printf("%s: file creation problems\n", __func__);
+        return(errno);
+    }
+
+    if (st.st_size != newlen) {        /* not growing it, assume ok */
+        printf("%s: st_size = %lu,  newlen = %lu\n", __func__, st.st_size, newlen);
+        return(0);
+    }
+
+#if 0
     if (ftruncate(fd, newlen) < 0)   /* grow it */
         return(errno);
 
@@ -44,10 +94,10 @@ static int posix_fallocate(int fd, off_t offset, off_t len) {
         if (rv == 0)
             return(EIO);
     }
-
+#endif
+    free(buf);
     return(0);
 }
-#endif
 
 /*
  * backend configuration -- all filesystem aging I/O is routed here!
@@ -125,7 +175,8 @@ void issueCreate(const char *path, size_t len) {
       if(rv < 0) {
         sleep(1);
       }
-      rv = g_backend->bd_fallocate(fd, 0, len);
+      rv = my_posix_fallocate(fd, 0, len);
+      //rv = g_backend->bd_fallocate(fd, 0, len);
     } while(rv != 0);
     if(rv != 0) {
       fprintf(stderr,
@@ -172,8 +223,13 @@ int File::createFile() {
   }
   std::string path = mount_point + slash + this->path;
   size_t size = this->blk_size * this->blk_count;
+
+  issueCreate(path.c_str(), size);
+
+  /*
   if(!fake)
     pool->enqueue([path, size] { issueCreate(path.c_str(), size); });
+  */
   return 0;
 }
 
@@ -921,7 +977,12 @@ int performStableAging(size_t till_size, int idle_injections,
         return 1;
       }
     }
-    if(tick >= future_tick) {
+    if (tick >= 630000) {
+        trigger = convergence;
+        std::cout <<
+            "Aging stopped due to ticks >= 630000."
+            << std::endl;
+    } else if(tick >= future_tick) {
       trigger = convergence;
       std::cout <<
         "Aging stopped due to perfect convergence in relative age distribution."
@@ -1037,6 +1098,69 @@ int main(int argc, char *argv[]) {
   int concurrency = 0;
   int idle_injections = 0;
   int query_before_quitting = 0;
+
+  /*
+    int ioctl_fd = 0;
+    int ioctl_ret = 0;
+    char ioctl_file_name[256];
+    int hint_numa_node_flag = 0x40000000;
+	int cpu_start, cpu_end, cpu_idx;
+	cpu_set_t cpuset;
+	pthread_t thread;
+    int ioctl_s;
+
+	thread = pthread_self();
+
+    sprintf(ioctl_file_name, "/mnt/pmem1/ioctl_file_%d", getpid());
+
+    ioctl_fd = open(ioctl_file_name, O_RDWR | O_CREAT, 0666);
+    if (ioctl_fd < 0) {
+        printf("%s: file open failed. Error = %s\n", __func__, strerror(errno));
+        exit(-1);
+    }
+
+	ioctl_ret = ioctl(ioctl_fd, _IOWR('f', 19, unsigned long), &hint_numa_node_flag);
+	if (ioctl_ret < 0) {
+		printf("%s: ioctl failed. Err = %s\n", __func__, strerror(errno));
+	} else {
+		printf("%s: ioctl passed. Will use NUMA node %d for this application\n", __func__, ioctl_ret);
+	}
+	close(ioctl_fd);
+
+	if (ioctl_ret >= 0) {
+		CPU_ZERO(&cpuset);
+		if (ioctl_ret == 0) {
+			cpu_start = 1;
+			cpu_end = 24;
+		} else if (ioctl_ret == 1) {
+			cpu_start = 25;
+			cpu_end = 48;
+		}
+
+		for (cpu_idx = cpu_start; cpu_idx < cpu_end; cpu_idx++) {
+			CPU_SET(cpu_idx, &cpuset);
+		}
+
+		ioctl_s = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
+		if (ioctl_s != 0)
+			handle_error_en(ioctl_s, "pthread_setaffinity_np");
+
+		ioctl_s = pthread_getaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
+		if (ioctl_s != 0)
+			handle_error_en(ioctl_s, "pthread_getaffinity_np");
+
+		printf("Set returned by pthread_getaffinity_np() contained:\n");
+		for (cpu_idx = cpu_start; cpu_idx < CPU_SETSIZE; cpu_idx++)
+			if (CPU_ISSET(cpu_idx, &cpuset))
+				printf("    CPU %d\n", cpu_idx);
+	}
+
+
+    close(ioctl_fd);
+
+    */
+
+
   while((option = getopt(argc, argv,
                          "n:u:r:m:a:s:d:x:y:z:t:i:f:p:c:q:w:b:")) != EOF) {
     switch(option) {
