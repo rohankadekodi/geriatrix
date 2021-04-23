@@ -175,8 +175,8 @@ void issueCreate(const char *path, size_t len) {
       if(rv < 0) {
         sleep(1);
       }
-      rv = my_posix_fallocate(fd, 0, len);
-      //rv = g_backend->bd_fallocate(fd, 0, len);
+      //rv = my_posix_fallocate(fd, 0, len);
+      rv = g_backend->bd_fallocate(fd, 0, len);
     } while(rv != 0);
     if(rv != 0) {
       fprintf(stderr,
@@ -977,12 +977,21 @@ int performStableAging(size_t till_size, int idle_injections,
         return 1;
       }
     }
+    /*
     if (tick >= 630000) {
         trigger = convergence;
         std::cout <<
             "Aging stopped due to ticks >= 630000."
             << std::endl;
-    } else if(tick >= future_tick) {
+    } 
+    if (tick >= 5000000) {
+        trigger = convergence;
+        std::cout <<
+            "Aging stopped due to ticks >= 5000000."
+            << std::endl;
+    }
+    */
+    else if (tick >= future_tick) {
       trigger = convergence;
       std::cout <<
         "Aging stopped due to perfect convergence in relative age distribution."

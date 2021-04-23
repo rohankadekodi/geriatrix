@@ -74,7 +74,7 @@ static int my_posix_fallocate(int fd, off_t offset, off_t len) {
     }
 
     if (st.st_size != newlen) {        /* not growing it, assume ok */
-        printf("%s: st_size = %lu,  newlen = %lu\n", __func__, st.st_size, newlen);
+        //printf("%s: st_size = %lu,  newlen = %lu\n", __func__, st.st_size, newlen);
         return(0);
     }
 
@@ -977,7 +977,7 @@ int performStableAging(size_t till_size, int idle_injections,
         return 1;
       }
     }
-    if (tick >= 630000) {
+    if (tick >= 5000000) {
         trigger = convergence;
         std::cout <<
             "Aging stopped due to ticks >= 630000."
